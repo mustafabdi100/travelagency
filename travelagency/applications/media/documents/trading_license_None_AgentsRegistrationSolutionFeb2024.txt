@@ -1,0 +1,59 @@
+
+I would split the registration process into 3 parts:
+Part 1 of the form:
+
+BUSINESS DETAILS	
+	Business Name:
+	Registration Number:
+	Business KRA PIN:
+	Business Address:
+		Physical Business Location
+		City
+		Country
+	Business Phone Number:
+	Business Email Address:
+	Attach Business Registration Certificate:
+	Attach Business Trading License:
+	Attach Business Tax Compliance:
+
+** all fields should be mandatory
+
+Click Next:
+Have a button to add contact Person. Allow adding up to 3 contact persons.
+CONTACT PERSON
+	First Name
+	Last Name
+	Mobile Number
+	Email Address
+
+** all fields should be mandatory
+	
+Click Next:
+have a button to add credit cards. Allow adding up to 3 credit cards.
+
+Card Type: Visa/MasterCard/American Express (this should be the option)
+Last 8 Digits of the card
+
+After this, click Review, to see all the information you have entered.
+After this, click Submit to submit the application.
+
+All applications will be assigned a 6 digit reference number upon submission
+
+On submitting an application, you will receive an email informaing you that your application has been submitted and will be processed.
+You will recived a notification once the application is processed.
+
+ you should also include;
+	A Dashboard that will include stats of all applications, pending applications, approved applications, rejected applications
+	A Users part: to add users who will have the rights to review and approve applications.
+		this will allow you to add a user who can login to the platform: FName, LName, Email, Password
+		you should be able to deactivate users or remove users.
+		all new users added have a default status of active
+	A logs part: to keep track of all user & system activities like submissions, approvals, rejections, add user, remove user, deactivate user, 
+		**keep track of all timestamps for activities logged.
+		
+For all pending applications, the approver can click view for any application, review the details of the application, and have two options, to close, approve or reject. Closing takes you back to previous screen.
+For all approved applications, the approver can click view for any application, and have an option to close or reject (this is to allow for rejecting applications that we initially submitted)
+For all rejected applications, the approver can click view for any application, and have an option to close only.
+
+
+	

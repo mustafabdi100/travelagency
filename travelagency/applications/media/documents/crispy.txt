@@ -1,0 +1,1452 @@
+Form wizard
+The form wizard application splits forms across multiple Web pages. It maintains state in one of the backends so that the full server-side processing can be delayed until the submission of the final form.
+
+You might want to use this if you have a lengthy form that would be too unwieldy for display on a single page. The first page might ask the user for core information, the second page might ask for less important information, etc.
+
+The term “wizard”, in this context, is explained on Wikipedia.
+
+How it works
+Here’s the basic workflow for how a user would use a wizard:
+
+The user visits the first page of the wizard, fills in the form and submits it.
+The server validates the data. If it’s invalid, the form is displayed again, with error messages. If it’s valid, the server saves the current state of the wizard in the backend and redirects to the next step.
+Step 1 and 2 repeat, for every subsequent form in the wizard.
+Once the user has submitted all the forms and all the data has been validated, the wizard processes the data – saving it to the database, sending an email, or whatever the application needs to do.
+Usage
+This application handles as much machinery for you as possible. Generally, you just have to do these things:
+
+Define a number of Form classes – one per wizard page.
+Create a WizardView subclass that specifies what to do once all of your forms have been submitted and validated. This also lets you override some of the wizard’s behavior.
+Create some templates that render the forms. You can define a single, generic template to handle every one of the forms, or you can define a specific template for each form.
+Add formtools to your INSTALLED_APPS list in your settings file.
+Point your URLconf at your WizardView as_view() method.
+Defining Form classes
+The first step in creating a form wizard is to create the Form classes. These should be standard django.forms.Form classes, covered in the forms documentation. These classes can live anywhere in your codebase, but convention is to put them in a file called forms.py in your application.
+
+For example, let’s write a “contact form” wizard, where the first page’s form collects the sender’s email address and subject, and the second page collects the message itself. Here’s what the forms.py might look like:
+
+from django import forms
+
+class ContactForm1(forms.Form):
+    subject = forms.CharField(max_length=100)
+    sender = forms.EmailField()
+
+class ContactForm2(forms.Form):
+    message = forms.CharField(widget=forms.Textarea)
+Note
+
+In order to use FileField in any form, see the section Handling files below to learn more about what to do.
+
+Creating a WizardView subclass
+classformtools.wizard.views.SessionWizardView
+classformtools.wizard.views.CookieWizardView
+The next step is to create a formtools.wizard.views.WizardView subclass. You can also use the SessionWizardView or CookieWizardView classes which preselect the backend used for storing information during execution of the wizard (as their names indicate, server-side sessions and browser cookies respectively).
+
+Note
+
+To use the SessionWizardView follow the instructions in the sessions documentation on how to enable sessions.
+
+We will use the SessionWizardView in all examples but is completely fine to use the CookieWizardView instead. As with your Form classes, this WizardView class can live anywhere in your codebase, but convention is to put it in views.py.
+
+The only requirement on this subclass is that it implement a done() method.
+
+WizardView.done(form_list, form_dict, **kwargs)
+This method specifies what should happen when the data for every form is submitted and validated. This method is passed a list and dictionary of validated Form instances.
+
+In this simplistic example, rather than performing any database operation, the method simply renders a template of the validated data:
+
+from django.shortcuts import render
+from formtools.wizard.views import SessionWizardView
+
+class ContactWizard(SessionWizardView):
+    def done(self, form_list, **kwargs):
+        return render(self.request, 'done.html', {
+            'form_data': [form.cleaned_data for form in form_list],
+        })
+Note that this method will be called via POST, so it really ought to be a good Web citizen and redirect after processing the data. Here’s another example:
+
+from django.http import HttpResponseRedirect
+from formtools.wizard.views import SessionWizardView
+
+class ContactWizard(SessionWizardView):
+    def done(self, form_list, **kwargs):
+        do_something_with_the_form_data(form_list)
+        return HttpResponseRedirect('/page-to-redirect-to-when-done/')
+In addition to form_list, the done() method is passed a form_dict, which allows you to access the wizard’s forms based on their step names. This is especially useful when using NamedUrlWizardView, for example:
+
+def done(self, form_list, form_dict, **kwargs):
+    user = form_dict['user'].save()
+    credit_card = form_dict['credit_card'].save()
+    # ...
+Changed in version 1.7: Previously, the form_dict argument wasn’t passed to the done method.
+
+See the section Advanced WizardView methods below to learn about more WizardView hooks.
+
+Creating templates for the forms
+Next, you’ll need to create a template that renders the wizard’s forms. By default, every form uses a template called formtools/wizard/wizard_form.html. You can change this template name by overriding either the template_name attribute or the get_template_names() method, which are documented in the TemplateResponseMixin documentation. The latter one allows you to use a different template for each form (see the example below).
+
+This template expects a wizard object that has various items attached to it:
+
+form – The Form or BaseFormSet instance for the current step (either empty or with errors).
+steps – A helper object to access the various steps related data:
+step0 – The current step (zero-based).
+step1 – The current step (one-based).
+count – The total number of steps.
+first – The first step.
+last – The last step.
+current – The current (or first) step.
+next – The next step.
+prev – The previous step.
+index – The index of the current step.
+all – A list of all steps of the wizard.
+You can supply additional context variables by using the get_context_data() method of your WizardView subclass.
+
+Here’s a full example template:
+
+{% extends "base.html" %}
+{% load i18n %}
+
+{% block head %}
+{{ wizard.form.media }}
+{% endblock %}
+
+{% block content %}
+<p>Step {{ wizard.steps.step1 }} of {{ wizard.steps.count }}</p>
+<form action="" method="post">{% csrf_token %}
+<table>
+{{ wizard.management_form }}
+{% if wizard.form.forms %}
+    {{ wizard.form.management_form }}
+    {% for form in wizard.form.forms %}
+        {{ form.as_table }}
+    {% endfor %}
+{% else %}
+    {{ wizard.form }}
+{% endif %}
+</table>
+{% if wizard.steps.prev %}
+<button name="wizard_goto_step" type="submit" value="{{ wizard.steps.first }}">{% translate "first step" %}</button>
+<button name="wizard_goto_step" type="submit" value="{{ wizard.steps.prev }}">{% translate "prev step" %}</button>
+{% endif %}
+<input type="submit" value="{% translate "submit" %}"/>
+</form>
+{% endblock %}
+Note
+
+Note that {{ wizard.management_form }} must be used for the wizard to work properly.
+
+Hooking the wizard into a URLconf
+WizardView.as_view()
+Finally, we need to specify which forms to use in the wizard, and then deploy the new WizardView object at a URL in the urls.py. The wizard’s as_view() method takes a list of your Form classes as an argument during instantiation:
+
+from django.path import path
+
+from myapp.forms import ContactForm1, ContactForm2
+from myapp.views import ContactWizard
+
+urlpatterns = [
+    path('contact/', ContactWizard.as_view([ContactForm1, ContactForm2])),
+]
+You can also pass the form list as a class attribute named form_list:
+
+class ContactWizard(WizardView):
+    form_list = [ContactForm1, ContactForm2]
+Using a different template for each form
+As mentioned above, you may specify a different template for each form. Consider an example using a form wizard to implement a multi-step checkout process for an online store. In the first step, the user specifies a billing and shipping address. In the second step, the user chooses payment type. If they chose to pay by credit card, they will enter credit card information in the next step. In the final step, they will confirm the purchase.
+
+Here’s what the view code might look like:
+
+from django.http import HttpResponseRedirect
+from formtools.wizard.views import SessionWizardView
+
+FORMS = [("address", myapp.forms.AddressForm),
+         ("paytype", myapp.forms.PaymentChoiceForm),
+         ("cc", myapp.forms.CreditCardForm),
+         ("confirmation", myapp.forms.OrderForm)]
+
+TEMPLATES = {"address": "checkout/billingaddress.html",
+             "paytype": "checkout/paymentmethod.html",
+             "cc": "checkout/creditcard.html",
+             "confirmation": "checkout/confirmation.html"}
+
+def pay_by_credit_card(wizard):
+    """Return true if user opts to pay by credit card"""
+    # Get cleaned data from payment step
+    cleaned_data = wizard.get_cleaned_data_for_step('paytype') or {'method': 'none'}
+    # Return true if the user selected credit card
+    return cleaned_data['method'] == 'cc'
+
+
+class OrderWizard(SessionWizardView):
+    def get_template_names(self):
+        return [TEMPLATES[self.steps.current]]
+
+    def done(self, form_list, **kwargs):
+        do_something_with_the_form_data(form_list)
+        return HttpResponseRedirect('/page-to-redirect-to-when-done/')
+        ...
+The urls.py file would contain something like:
+
+urlpatterns = [
+    path('checkout/', OrderWizard.as_view(FORMS, condition_dict={'cc': pay_by_credit_card})),
+]
+The condition_dict can be passed as attribute for the as_view() method or as a class attribute named condition_dict:
+
+class OrderWizard(WizardView):
+    condition_dict = {'cc': pay_by_credit_card}
+Note that the OrderWizard object is initialized with a list of pairs. The first element in the pair is a string that corresponds to the name of the step and the second is the form class.
+
+In this example, the get_template_names() method returns a list containing a single template, which is selected based on the name of the current step.
+
+Advanced WizardView methods
+classformtools.wizard.views.WizardView
+Aside from the done() method, WizardView offers a few advanced method hooks that let you customize how your wizard works.
+
+Some of these methods take an argument step, which is a zero-based counter as string representing the current step of the wizard. (E.g., the first form is '0' and the second form is '1')
+
+WizardView.get_form_prefix(step=None, form=None)
+Returns the prefix which will be used when calling the form for the given step. step contains the step name, form the form class which will be called with the returned prefix.
+
+If no step is given, it will be determined automatically. By default, this simply uses the step itself and the form parameter is not used.
+
+For more, see the form prefix documentation.
+
+WizardView.get_form_initial(step)
+Returns a dictionary which will be passed as the initial argument when instantiating the Form instance for step step. If no initial data was provided while initializing the form wizard, an empty dictionary should be returned.
+
+The default implementation:
+
+def get_form_initial(self, step):
+    return self.initial_dict.get(step, {})
+WizardView.get_form_kwargs(step)
+Returns a dictionary which will be used as the keyword arguments when instantiating the form instance on given step.
+
+The default implementation:
+
+def get_form_kwargs(self, step):
+    return {}
+WizardView.get_form_instance(step)
+This method will be called only if a ModelForm is used as the form for step step.
+
+Returns an Model object which will be passed as the instance argument when instantiating the ModelForm for step step. If no instance object was provided while initializing the form wizard, None will be returned.
+
+The default implementation:
+
+def get_form_instance(self, step):
+    return self.instance_dict.get(step, None)
+WizardView.get_context_data(form, **kwargs)
+Returns the template context for a step. You can overwrite this method to add more data for all or some steps. This method returns a dictionary containing the rendered form step.
+
+The default template context variables are:
+
+Any extra data the storage backend has stored
+wizard – a dictionary representation of the wizard instance with the following key/values:
+form – Form or BaseFormSet instance for the current step
+steps – A helper object to access the various steps related data
+management_form – all the management data for the current step
+Example to add extra variables for a specific step:
+
+def get_context_data(self, form, **kwargs):
+    context = super().get_context_data(form=form, **kwargs)
+    if self.steps.current == 'my_step_name':
+        context.update({'another_var': True})
+    return context
+WizardView.get_prefix(request, *args, **kwargs)
+This method returns a prefix for use by the storage backends. Backends use the prefix as a mechanism to allow data to be stored separately for each wizard. This allows wizards to store their data in a single backend without overwriting each other.
+
+You can change this method to make the wizard data prefix more unique to, e.g. have multiple instances of one wizard in one session.
+
+Default implementation:
+
+def get_prefix(self, request, *args, **kwargs):
+    # use the lowercase underscore version of the class name
+    return normalize_name(self.__class__.__name__)
+Changed in version 1.0: The request parameter was added.
+
+WizardView.get_form(step=None, data=None, files=None)
+This method constructs the form for a given step. If no step is defined, the current step will be determined automatically. If you override get_form, however, you will need to set step yourself using self.steps.current as in the example below. The method gets three arguments:
+
+step – The step for which the form instance should be generated.
+data – Gets passed to the form’s data argument
+files – Gets passed to the form’s files argument
+You can override this method to add extra arguments to the form instance.
+
+Example code to add a user attribute to the form on step 2:
+
+def get_form(self, step=None, data=None, files=None):
+    form = super().get_form(step, data, files)
+
+    # determine the step if not given
+    if step is None:
+        step = self.steps.current
+
+    if step == '1':
+        form.user = self.request.user
+    return form
+WizardView.process_step(form)
+Hook for modifying the wizard’s internal state, given a fully validated Form object. The Form is guaranteed to have clean, valid data.
+
+This method gives you a way to post-process the form data before the data gets stored within the storage backend. By default it just returns the form.data dictionary. You should not manipulate the data here but you can use it to do some extra work if needed (e.g. set storage extra data).
+
+Note that this method is called every time a page is rendered for all submitted steps.
+
+The default implementation:
+
+def process_step(self, form):
+    return self.get_form_step_data(form)
+WizardView.process_step_files(form)
+This method gives you a way to post-process the form files before the files gets stored within the storage backend. By default it just returns the form.files dictionary. You should not manipulate the data here but you can use it to do some extra work if needed (e.g. set storage extra data).
+
+Default implementation:
+
+def process_step_files(self, form):
+    return self.get_form_step_files(form)
+WizardView.render_goto_step(step, goto_step, **kwargs)
+This method is called when the step should be changed to something else than the next step. By default, this method just stores the requested step goto_step in the storage and then renders the new step.
+
+If you want to store the entered data of the current step before rendering the next step, you can overwrite this method.
+
+WizardView.render_revalidation_failure(step, form, **kwargs)
+When the wizard thinks all steps have passed it revalidates all forms with the data from the backend storage.
+
+If any of the forms don’t validate correctly, this method gets called. This method expects two arguments, step and form.
+
+The default implementation resets the current step to the first failing form and redirects the user to the invalid form.
+
+Default implementation:
+
+def render_revalidation_failure(self, step, form, **kwargs):
+    self.storage.current_step = step
+    return self.render(form, **kwargs)
+WizardView.get_form_step_data(form)
+This method fetches the data from the form Form instance and returns the dictionary. You can use this method to manipulate the values before the data gets stored in the storage backend.
+
+Default implementation:
+
+def get_form_step_data(self, form):
+    return form.data
+WizardView.get_form_step_files(form)
+This method returns the form files. You can use this method to manipulate the files before the data gets stored in the storage backend.
+
+Default implementation:
+
+def get_form_step_files(self, form):
+    return form.files
+WizardView.render(form, **kwargs)
+This method gets called after the GET or POST request has been handled. You can hook in this method to, e.g. change the type of HTTP response.
+
+Default implementation:
+
+def render(self, form=None, **kwargs):
+    form = form or self.get_form()
+    context = self.get_context_data(form=form, **kwargs)
+    return self.render_to_response(context)
+WizardView.get_cleaned_data_for_step(step)
+This method returns the cleaned data for a given step. Before returning the cleaned data, the stored values are revalidated through the form. If the data doesn’t validate, None will be returned.
+
+WizardView.get_all_cleaned_data()
+This method returns a merged dictionary of all form steps’ cleaned_data dictionaries. If a step contains a FormSet, the key will be prefixed with formset- and contain a list of the formset’s cleaned_data dictionaries. Note that if two or more steps have a field with the same name, the value for that field from the latest step will overwrite the value from any earlier steps.
+
+Providing initial data for the forms
+WizardView.initial_dict
+Initial data for a wizard’s Form objects can be provided using the optional initial_dict keyword argument. This argument should be a dictionary mapping the steps to dictionaries containing the initial data for each step. The dictionary of initial data will be passed along to the constructor of the step’s Form:
+
+>>> from myapp.forms import ContactForm1, ContactForm2
+>>> from myapp.views import ContactWizard
+>>> initial = {
+...     '0': {'subject': 'Hello', 'sender': 'user@example.com'},
+...     '1': {'message': 'Hi there!'}
+... }
+>>> # This example is illustrative only and isn't meant to be run in
+>>> # the shell since it requires an HttpRequest to pass to the view.
+>>> wiz = ContactWizard.as_view([ContactForm1, ContactForm2], initial_dict=initial)(request)
+>>> form1 = wiz.get_form('0')
+>>> form2 = wiz.get_form('1')
+>>> form1.initial
+{'sender': 'user@example.com', 'subject': 'Hello'}
+>>> form2.initial
+{'message': 'Hi there!'}
+The initial_dict can also take a list of dictionaries for a specific step if the step is a FormSet.
+
+The initial_dict can also be added as a class attribute named initial_dict to avoid having the initial data in the urls.py.
+
+Handling files
+WizardView.file_storage
+To handle FileField within any step form of the wizard, you have to add a file_storage to your WizardView subclass.
+
+This storage will temporarily store the uploaded files for the wizard. The file_storage attribute should be a Storage subclass.
+
+Django provides a built-in storage class (see the built-in filesystem storage class):
+
+from django.conf import settings
+from django.core.files.storage import FileSystemStorage
+
+class CustomWizardView(WizardView):
+    ...
+    file_storage = FileSystemStorage(location=os.path.join(settings.MEDIA_ROOT, 'photos'))
+Warning
+
+Please remember to take care of removing old temporary files, as the WizardView will only remove these files if the wizard finishes correctly.
+
+Conditionally view/skip specific steps
+WizardView.condition_dict
+The as_view() method accepts a condition_dict argument. You can pass a dictionary of boolean values or callables. The key should match the steps names (e.g. ‘0’, ‘1’).
+
+If the value of a specific step is callable it will be called with the WizardView instance as the only argument. If the return value is true, the step’s form will be used.
+
+This example provides a contact form including a condition. The condition is used to show a message form only if a checkbox in the first step was checked.
+
+The steps are defined in a forms.py file:
+
+from django import forms
+
+class ContactForm1(forms.Form):
+    subject = forms.CharField(max_length=100)
+    sender = forms.EmailField()
+    leave_message = forms.BooleanField(required=False)
+
+class ContactForm2(forms.Form):
+    message = forms.CharField(widget=forms.Textarea)
+We define our wizard in a views.py:
+
+from django.shortcuts import render
+from formtools.wizard.views import SessionWizardView
+
+def show_message_form_condition(wizard):
+    # try to get the cleaned data of step 1
+    cleaned_data = wizard.get_cleaned_data_for_step('0') or {}
+    # check if the field ``leave_message`` was checked.
+    return cleaned_data.get('leave_message', True)
+
+class ContactWizard(SessionWizardView):
+
+    def done(self, form_list, **kwargs):
+        return render(self.request, 'done.html', {
+            'form_data': [form.cleaned_data for form in form_list],
+        })
+We need to add the ContactWizard to our urls.py file:
+
+from django.urls import path
+
+from myapp.forms import ContactForm1, ContactForm2
+from myapp.views import ContactWizard, show_message_form_condition
+
+contact_forms = [ContactForm1, ContactForm2]
+
+urlpatterns = [
+    path('contact/', ContactWizard.as_view(contact_forms,
+        condition_dict={'1': show_message_form_condition}
+    )),
+]
+As you can see, we defined a show_message_form_condition next to our WizardView subclass and added a condition_dict argument to the as_view() method. The key refers to the second wizard step (because of the zero based step index).
+
+How to work with ModelForm and ModelFormSet
+WizardView.instance_dict
+WizardView supports ModelForms and ModelFormSets. Additionally to initial_dict, the as_view() method takes an instance_dict argument that should contain model instances for steps based on ModelForm and querysets for steps based on ModelFormSet.
+
+Usage of NamedUrlWizardView
+classformtools.wizard.views.NamedUrlWizardView
+classformtools.wizard.views.NamedUrlSessionWizardView
+classformtools.wizard.views.NamedUrlCookieWizardView
+NamedUrlWizardView is a WizardView subclass which adds named-urls support to the wizard. This allows you to have separate URLs for every step. You can also use the NamedUrlSessionWizardView or NamedUrlCookieWizardView classes which preselect the backend used for storing information (Django sessions and browser cookies respectively).
+
+To use the named URLs, you should not only use the NamedUrlWizardView instead of WizardView, but you will also have to change your urls.py.
+
+The as_view() method takes two additional arguments:
+
+a required url_name – the name of the url (as provided in the urls.py)
+an optional done_step_name – the name of the done step, to be used in the URL
+This is an example of a urls.py for a contact wizard with two steps, step 1 named contactdata and step 2 named leavemessage:
+
+from django.urls import path, re_path
+
+from myapp.forms import ContactForm1, ContactForm2
+from myapp.views import ContactWizard
+
+named_contact_forms = (
+    ('contactdata', ContactForm1),
+    ('leavemessage', ContactForm2),
+)
+
+contact_wizard = ContactWizard.as_view(named_contact_forms,
+    url_name='contact_step', done_step_name='finished')
+
+urlpatterns = [
+    re_path(r'^contact/(?P<step>.+)/$', contact_wizard, name='contact_step'),
+    path('contact/', contact_wizard, name='contact'),
+]
+Advanced NamedUrlWizardView methods
+NamedUrlWizardView.get_step_url(step)
+This method returns the URL for a specific step.
+
+Default implementation:
+
+def get_step_url(self, step):
+    return reverse(self.url_name, kwargs={'step': step})
+
+DJANGO CRISPY FORMS 
+
+Installation
+Installing django-crispy-forms
+Install latest stable version into your python environment using pip:
+
+pip install django-crispy-forms
+If you want to install development version (unstable), you can do so doing:
+
+pip install git+git://github.com/django-crispy-forms/django-crispy-forms.git@main#egg=django-crispy-forms
+Or, if you’d like to install the development version as a git repository (so you can git pull updates), use the -e flag with pip install, like so:
+
+pip install -e git+git://github.com/django-crispy-forms/django-crispy-forms.git@main#egg=django-crispy-forms
+Once installed add crispy_forms to your INSTALLED_APPS in settings.py:
+
+INSTALLED_APPS = (
+    ...
+    'crispy_forms',
+)
+In production environments, always activate Django template cache loader. This is available since Django 1.2 and what it does is basically load templates once, then cache the result for every subsequent render. This leads to a significant performance improvement. To see how to set it up refer to the fabulous Django docs page.
+
+Template packs
+Since version 2.0, django-crispy-forms template packs are now in separate packages.
+
+You will need to install the appropriate template pack for your CSS framework and add it to your list of INSTALLED_APPS. The the following template packs have been extracted from crispy-forms core are now available on PyPI.
+
+Bootstrap2 crispy-forms-bootstrap2.
+
+Bootstrap3 crispy-bootstrap3.
+
+Bootstrap4 crispy-bootstrap4.
+
+Version v1.x also provided template packs for:
+
+uni-form Uni-form is a nice looking, well structured, highly customizable, accessible and usable forms.
+
+In addition the following template packs are available through separately maintained projects.
+
+foundation Foundation In the creator’s words, “The most advanced responsive front-end framework in the world.” This template pack is available through crispy-forms-foundation
+
+tailwind Tailwind A utility first framework. This template pack is available through crispy-tailwind
+
+Bootstrap 5 Support for newer versions of Bootstrap will be in separate template packs. This starts with version 5 and is available through crispy-bootstrap5
+
+Bulma Bulma: the modern CSS framework that just works. This template pack is available through crispy-bulma
+
+If your form CSS framework is not supported and it’s open source, you can create a crispy-forms-templatePackName project. Please let me know, so I can link to it. Documentation on How to create your own template packs is provided.
+
+You can set your default template pack for your project using the CRISPY_TEMPLATE_PACK Django settings variable:
+
+CRISPY_TEMPLATE_PACK = 'uni_form'
+Please check the documentation of your template pack package for the correct value of the CRISPY_TEMPLATE_PACK setting (there are packages which provide more than one template pack).
+
+Setting static files
+crispy-forms does not include static files. You will need to include the proper corresponding static files yourself depending on what CSS framework (Template pack) you are using. This might involve one or more CSS and JS files. Read CSS framework’s docs for help on how to set it up.
+
+crispy filter
+Crispy filter lets you render a form or formset using django-crispy-forms elegantly div based fields. Let’s see a usage example:
+
+{% load crispy_forms_tags %}
+
+<form method="post" class="my-class">
+    {{ my_formset|crispy }}
+</form>
+Add {% load crispy_forms_tags %} to the template.
+
+Append the |crispy filter to your form or formset context variable.
+
+Refresh and enjoy!
+
+Using {% crispy %} tag because it rocks
+As handy as the |crispy filter is, think of it as the built-in methods: as_table, as_ul and as_p. You cannot tune up the output. The best way to make your forms crisp is using the {% crispy %} tag with forms. It will change how you do forms in Django.
+
+% crispy %} tag with forms
+django-crispy-forms implements a class called FormHelper that defines the form rendering behavior. Helpers give you a way to control form attributes and its layout, doing this in a programmatic way using Python. This way you write as little HTML as possible, and all your logic stays in the forms and views files.
+
+Fundamentals
+For the rest of this document we will use the following example form for showing how to use a helper. This form is in charge of gathering some user information:
+
+class ExampleForm(forms.Form):
+    like_website = forms.TypedChoiceField(
+        label = "Do you like this website?",
+        choices = ((1, "Yes"), (0, "No")),
+        coerce = lambda x: bool(int(x)),
+        widget = forms.RadioSelect,
+        initial = '1',
+        required = True,
+    )
+
+    favorite_food = forms.CharField(
+        label = "What is your favorite food?",
+        max_length = 80,
+        required = True,
+    )
+
+    favorite_color = forms.CharField(
+        label = "What is your favorite color?",
+        max_length = 80,
+        required = True,
+    )
+
+    favorite_number = forms.IntegerField(
+        label = "Favorite number",
+        required = False,
+    )
+
+    notes = forms.CharField(
+        label = "Additional notes or feedback",
+        required = False,
+    )
+Let’s see how helpers work step by step, with some examples explained. First you will need to import FormHelper:
+
+from crispy_forms.helper import FormHelper
+Your helper can be a class level variable or an instance level variable, if you don’t know what this means you might want to read the article “Be careful how you use static variables in forms”. As a rule of thumb, if you are not going to manipulate a FormHelper in your code, like in a view, you should be using a static helper, otherwise you should be using an instance level helper. If you still don’t understand the subtle differences between both, use an instance level helper, because you won’t end up suffering side effects. As in the next steps I will show you how to manipulate the form helper, so we will create an instance level helper. This is how you would do it:
+
+from crispy_forms.helper import FormHelper
+
+class ExampleForm(forms.Form):
+    [...]
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.helper = FormHelper()
+As you can see you need to call the base class constructor using super and override the constructor. This helper doesn’t set any form attributes, so it’s useless. Let’s see how to set up some basic FormHelper attributes:
+
+from crispy_forms.helper import FormHelper
+from crispy_forms.layout import Submit
+
+class ExampleForm(forms.Form):
+    [...]
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.helper = FormHelper()
+        self.helper.form_id = 'id-exampleForm'
+        self.helper.form_class = 'blueForms'
+        self.helper.form_method = 'post'
+        self.helper.form_action = 'submit_survey'
+
+        self.helper.add_input(Submit('submit', 'Submit'))
+Note that we are importing a class called Submit that is a layout object. We will see what layout objects are in detail later on, for now on let’s just say that this adds a submit button to our form, so people can send their survey.
+
+We’ve also done some helper magic. FormHelper has a list of attributes that can be set, that affect mainly form attributes. Our form will have as DOM id id-exampleForm, it will have as DOM CSS class blueForms, it will use http POST to send information and its action will be set to reverse(submit_survey).
+
+Let’s see how to render the form in a template. Supposing we have the form in the template context as example_form, we would render it doing:
+
+{% load crispy_forms_tags %}
+{% crispy example_form example_form.helper %}
+Notice that the {% crispy %} tags expects two parameters: first the form variable and then the helper. In this case we use the FormHelper attached to the form, but you could also create a FormHelper instance and pass it as a context variable. Most of the time, you will want to use the helper attached. Note that if you name your FormHelper attribute helper you will only need to do:
+
+{% crispy form %}
+With the default Bootstrap 4 template pack, this is exactly the html that you would get:
+
+<form action="submit_survey" class="blueForms" id="id-exampleForm" method="post">
+    <input name="csrfmiddlewaretoken" type="hidden" value="evU93ufHyzX5dP5h5hgOaq96zIj8c02X">
+    <div id="div_id_like_website" class="form-group">
+        <label class="requiredField"> Do you like this website?<span class="asteriskField">*</span> </label>
+        <div action="submit_survey" class="blueForms" id="id-exampleForm">
+            <div class="custom-control custom-radio">
+                <input type="radio" class="custom-control-input" name="like_website" value="1" id="id_like_website_0" required checked /> <label class="custom-control-label" for="id_like_website_0"> Yes </label>
+            </div>
+            <div class="custom-control custom-radio">
+                <input type="radio" class="custom-control-input" name="like_website" value="0" id="id_like_website_1" required /> <label class="custom-control-label" for="id_like_website_1"> No </label>
+            </div>
+        </div>
+    </div>
+    <div id="div_id_favorite_food" class="form-group">
+        <label for="id_favorite_food" class="requiredField"> What is your favorite food?<span class="asteriskField">*</span> </label>
+        <div><input type="text" name="favorite_food" maxlength="80" class="textinput inputtext form-control" required id="id_favorite_food" /></div>
+    </div>
+    <div id="div_id_favorite_color" class="form-group">
+        <label for="id_favorite_color" class="requiredField"> What is your favorite color?<span class="asteriskField">*</span> </label>
+        <div><input type="text" name="favorite_color" maxlength="80" class="textinput inputtext form-control" required id="id_favorite_color" /></div>
+    </div>
+    <div id="div_id_favorite_number" class="form-group">
+        <label for="id_favorite_number" class=""> Favorite number </label>
+        <div><input type="number" name="favorite_number" class="numberinput form-control" id="id_favorite_number" /></div>
+    </div>
+    <div id="div_id_notes" class="form-group">
+        <label for="id_notes" class=""> Additional notes or feedback </label>
+        <div><input type="text" name="notes" class="textinput inputtext form-control" id="id_notes" /></div>
+    </div>
+    <div class="form-group">
+        <div class=""><input type="submit" name="submit" value="Submit" class="btn btn-primary" id="submit-id-submit" /></div>
+    </div>
+</form>
+What you’ll get is the form rendered as HTML with awesome bits. Specifically…
+
+Opening and closing form tags, with id, class, action and method set as in the helper:
+
+<form action="submit_survey" class="blueForms" id="id-exampleForm" method="post">
+    [...]
+</form>
+Django’s CSRF controls:
+
+<input name="csrfmiddlewaretoken" type="hidden" value="evU93ufHyzX5dP5h5hgOaq96zIj8c02X">
+Submit button:
+
+<div class="form-group">
+    <div class=""><input type="submit" name="submit" value="Submit" class="btn btn-primary" id="submit-id-submit" /></div>
+</div>
+Manipulating a helper in a view
+Let’s see how we could change any helper property in a view:
+
+@login_required()
+def inbox(request, template_name):
+    example_form = ExampleForm()
+    redirect_url = request.GET.get('next')
+
+    # Form handling logic
+    [...]
+
+    if redirect_url is not None:
+        example_form.helper.form_action = reverse('submit_survey') + '?next=' + redirectUrl
+
+    return render_to_response(template_name, {'example_form': example_form}, context_instance=RequestContext(request))
+We are changing form_action helper property in case the view was called with a next GET parameter.
+
+Rendering several forms with helpers
+Often we get asked: “How do you render two or more forms, with their respective helpers, using {% crispy %} tag, without having <form> tags rendered twice?” Easy, you need to set form_tag helper property to False in every helper:
+
+self.helper.form_tag = False
+Then you will have to write a little of html code surrounding the forms:
+
+<form action="{% url 'submit_survey' %}" class="my-class" method="post">
+    {% crispy first_form %}
+    {% crispy second_form %}
+</form>
+You can read a list of Helper attributes you can set and what they are for.
+
+Change ‘*’ required fields
+If you don’t like the use of * (asterisk) to denote required fields you have two options:
+
+Asterisks have an asteriskField class set. So you can hide it using CSS rule:
+
+.asteriskField {
+    display: none;
+}
+Override field.html template with a custom one.
+
+Make crispy-forms fail loud
+By default when crispy-forms encounters errors, it fails silently, logs them and continues working if possible. A settings variable called CRISPY_FAIL_SILENTLY has been added so that you can control this behavior. If you want to raise exceptions instead of logging, telling you what’s going on when you are developing in debug mode, you can set it to:
+
+CRISPY_FAIL_SILENTLY = not DEBUG
+Change crispy-forms <input> default classes
+Django fields generate default classes, crispy-forms handles these and adds other classes for compatibility with CSS frameworks.
+
+For example a CharField generates an <input class="textinput" .... But in uni form we need the class to be textInput (with capital ‘I’), so crispy-forms leaves it like <input class="textinput textInput".... All official template packs are handled automatically, but maybe you are integrating a new CSS framework, or your company’s custom one, with crispy-forms and need to change the default conversions. For this you need to use a settings variable called CRISPY_CLASS_CONVERTERS, expected to be a Python dictionary:
+
+CRISPY_CLASS_CONVERTERS = {'textinput': "textinput inputtext"}
+For example this setting would generate <input class"textinput inputtext" .... The key of the dictionary textinput is the Django’s default class, the value is what you want it to be substituted with, in this case we are keeping textinput.
+
+Render a form within Python code
+Sometimes, it might be useful to render a form using crispy-forms within Python code, like a Django view, for that there is a nice helper render_crispy_form. The prototype of the method is render_crispy_form(form, helper=None, context=None). You can use it like this. Remember to pass your CSRF token to the helper method using the context dictionary if you want the rendered form to be able to submit.
+
+AJAX validation recipe
+You may wish to validate a crispy-form through AJAX to re-render any resulting form errors. One way to do this is to set up a view that validates the form and renders its html using render_crispy_form. This html is then returned to the client AJAX request. Let’s see an example.
+
+Our server side code could be:
+
+from django.template.context_processors import csrf
+from crispy_forms.utils import render_crispy_form
+
+@json_view
+def save_example_form(request):
+    form = ExampleForm(request.POST or None)
+    if form.is_valid():
+        # You could actually save through AJAX and return a success code here
+        form.save()
+        return {'success': True}
+
+
+    ctx = {}
+    ctx.update(csrf(request))
+    form_html = render_crispy_form(form, context=ctx)
+    return {'success': False, 'form_html': form_html}
+I’m using a jsonview decorator from django-jsonview.
+
+Note that you have to provide render_crispy_form the necessary CSRF token, otherwise it will not work.
+
+In our client side using jQuery would look like:
+
+var example_form = '#example-form';
+
+$.ajax({
+    url: "{% url 'save_example_form' %}",
+    type: "POST",
+    data: $(example_form).serialize(),
+    success: function(data) {
+        if (!(data['success'])) {
+            // Here we replace the form, for the
+            $(example_form).replaceWith(data['form_html']);
+        }
+        else {
+            // Here you can show the user a success message or do whatever you need
+            $(example_form).find('.success-message').show();
+        }
+    },
+    error: function () {
+        $(example_form).find('.error-message').show()
+    }
+});
+Warning
+
+When replacing form html, you need to bind events using live or on jQuery method.
+
+Bootstrap horizontal forms
+_images/bootstrap3_horizontal_form.jpg
+The way you do horizontal forms in Bootstrap version 3 is setting some col-lg-X classes in labels and divs wrapping fields. This would mean a lot of hassle updating your layout objects for settings these classes, too much verbosity. Instead some FormHelper attributes have been added to help you easily achieve this. You will need to set only three attributes:
+
+helper.form_class = 'form-horizontal'
+helper.label_class = 'col-lg-2'
+helper.field_class = 'col-lg-8'
+helper.layout = Layout(
+    'email',
+    'password',
+    'remember_me',
+    StrictButton('Sign in', css_class='btn-default'),
+)
+Of course you can set your widths as you like, it doesn’t have to be exactly like this.
+
+Bootstrap inline forms
+_images/bootstrap3_inline_form.jpg
+The way you do inline forms in Bootstrap version 3 is:
+
+helper.form_class = 'form-inline'
+helper.field_template = 'bootstrap3/layout/inline_field.html'
+helper.layout = Layout(
+    'email',
+    'password',
+    'remember_me',
+    StrictButton('Sign in', css_class='btn-default'),
+)
+Note: The form-inline class needs to be added to the form’s <form> tag. Therefore let crispy-forms render the <form> tag or add the form-inline class manually to the <form> tag in your template.
+
+If you need to set attributes in a field, you have to use InlineField instead of Field:
+
+from crispy_forms.bootstrap import InlineField
+
+helper.layout = Layout(
+    InlineField('email', readonly=True),
+    'password',
+    [...]
+)
+
+FormHelper
+What is a FormHelper and how to use it, is thoroughly explained in a previous section {% crispy %} tag with forms.
+
+FormHelper with a form attached (Default layout)
+Since version 1.2.0 FormHelper optionally can be passed an instance of a form. You would do it this way:
+
+from crispy_forms.helper import FormHelper
+
+class ExampleForm(forms.Form):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.helper = FormHelper(self)
+When you do this crispy-forms builds a default layout using form.fields for you, so you don’t have to manually list them all if your form is huge. If you later need to manipulate some bits of a big layout, using dynamic layouts is highly recommended, check Updating layouts on the go.
+
+Also, now the helper is able to cross match the layout with the form instance, being able to search by widget type if you are using dynamic API.
+
+Helper attributes you can set
+template_pack
+Allows you to set what template pack you want to use at FormHelper level. This is useful for example when a website needs to render different styling forms for different use cases, like desktop website vs smartphone website.
+
+template
+When set allows you to render a form/formset using a custom template. Default template is at {{ TEMPLATE_PACK }}/[whole_uni_form.html|whole_uni_formset.html].
+
+field_template
+When set allows you to render a form/formset using a custom field template. Default template is at {{ TEMPLATE_PACK }}/field.html.
+
+form_method = ``POST``
+Specifies form method attribute. You can see it to POST or GET. Defaults to POST.
+
+form_action
+Applied to the form action attribute. Can be a named URL in your URLconf that can be executed via the {% url %} template tag. Example: ‘show_my_profile’. In your URLconf you could have something like:
+
+url(r'^show/profile/$', 'show_my_profile_view', name='show_my_profile')
+You can also point it to a URL ‘/whatever/blabla/’.
+
+Sometimes you may want to add arguments to the URL, for that you will have to do in your view:
+
+from django.urls import reverse
+form.helper.form_action = reverse('url_name', args=[event.id])
+form.helper.form_action = reverse('url_name', kwargs={'book_id': book.id})
+attrs
+Added in 1.2.0, a dictionary to set any kind of form attributes. Underscores in keys are translated into hyphens. The recommended way when you need to set several form attributes in order to keep your helper tidy:
+
+``{'id': 'form-id', 'data_id': '/whatever'}``
+<form id="form-id" data-id="/whatever" ...>
+form_id
+Specifies form DOM id attribute. If no id provided then no id attribute is created on the form.
+
+form_class
+String containing separated CSS classes to be applied to form class attribute.
+
+form_tag = True
+It specifies if <form></form> tags should be rendered when using a Layout. If set to False it renders the form without the <form></form> tags. Defaults to True.
+
+disable_csrf = False
+Disable CSRF token, when done, crispy-forms won’t use {% csrf_token %} tag. This is useful when rendering several forms using {% crispy %} tag and form_tag = False csrf_token gets rendered several times.
+
+form_error_title
+If you are rendering a form using {% crispy %} tag and it has non_field_errors to display, they are rendered in a div. You can set the title of the div with this attribute. Example: “Form Errors”.
+
+formset_error_title
+If you are rendering a formset using {% crispy %} tag and it has non_form_errors to display, they are rendered in a div. You can set the title of the div with this attribute. Example: “Formset Errors”.
+
+form_show_errors = True
+Default set to True. It decides whether to render or not form errors. If set to False, form.errors will not be visible even if they happen. You have to manually render them customizing your template. This allows you to customize error output.
+
+render_unmentioned_fields = False
+By default django-crispy-forms renders the layout specified if it exists strictly, which means it only renders what the layout mentions, unless your form has Meta.fields and Meta.exclude defined, in that case it uses them. If you want to render unmentioned fields (all form fields), for example if you are worried about forgetting mentioning them you have to set this property to True. It defaults to False.
+
+render_hidden_fields = False
+By default django-crispy-forms renders the layout specified if it exists strictly. Sometimes you might be interested in rendering all form’s hidden fields no matter if they are mentioned or not. Useful when trying to render forms with layouts as part of a formset with hidden primary key fields. It defaults to False.
+
+render_required_fields = False
+By default django-crispy-forms renders the layout specified if it exists strictly. Sometimes you might be interested in rendering all form’s required fields no matter if they are mentioned or not. It defaults to False.
+
+include_media = True
+By default django-crispy-forms renders all form media for you within the form. If you want to render form media yourself manually outside the form, set this to False. If you want to globally prevent rendering of form media, override the FormHelper class with this setting modified. It defaults to True.
+
+Bootstrap Helper attributes
+There are currently some helper attributes that only have functionality for a specific template pack. This doesn’t necessarily mean that they won’t be supported for other template packs in the future.
+
+help_text_inline = False
+Sets whether help texts should be rendered inline or block. If set to True help texts will be rendered using help-inline class, otherwise using help-block. By default text messages are rendered in block mode.
+
+error_text_inline = True
+Sets whether to render error messages inline or block. If set to True errors will be rendered using help-inline class, otherwise using help-block. By default error messages are rendered in inline mode.
+
+form_show_labels = True
+Default set to True. Determines whether or not to render the form’s field labels.
+
+Bootstrap 3 Helper attributes
+All previous, bootstrap (version 2) attributes are also settable in bootstrap 3 template pack FormHelpers. Here are listed the ones, that are only available in bootstrap3 template pack:
+
+label_class = ‘’
+Default set to ''. This class will be applied to every label, this is very useful to do horizontal forms. Set it for example like this label_class = col-lg-2.
+
+field_class = ‘’
+Default set to ''. This class will be applied to every div controls wrapping a field. This is useful for doing horizontal forms. Set it for example like this field_class = col-lg-8.
+
+Bootstrap 4 Helper attributes
+All previous, bootstrap (version 2 and 3) attributes are also settable in bootstrap 4 template pack FormHelpers. Here are listed the ones, that are only available in bootstrap4 template pack:
+
+use_custom_control = True
+Enables the optional UI customization of the template pack for radio, checkbox, select and file field. Useful when you already have customization based on the default interpretation of the template pack. Setting to False results in the standard bootstrap classes being applied for radio and checkbox, and Django rendering for file field. See table below for examples.
+
+The file field requires additional JS to enable its functionality, it is provided within the template pack as vanilla JS.
+
+Defaults to True.
+
+Standard
+
+Optional
+
+radio
+
+customradio
+
+checkbox
+
+customcheckbox
+
+select
+
+customselect
+
+file
+
+customfile
+
+Custom Helper attributes
+Maybe you would like FormHelper to do some extra thing that is not currently supported or maybe you have a very specific use case. The good thing is that you can add extra attributes and crispy-forms will automatically inject them within template context. Let’s see an example, to make things clear.
+
+We want some forms to have uppercase labels, and for that we would like to set a helper attribute name labels_uppercase to True or False. So we go and set in our helper:
+
+helper.labels_uppercase = True
+What will happen is crispy-forms will inject a Django template variable named {{ labels_uppercase }} with its corresponding value within its templates, including field.html, which is the template in charge of rendering a field when using crispy-forms. So we can go into that template and customize it. We will need to get familiar with it, but it’s quite easy to follow; in the end it’s just a Django template.
+
+When we find where labels get rendered, this chunk of code to be more precise:
+
+{% if field.label and not field|is_checkbox and form_show_labels %}
+    <label for="{{ field.id_for_label }}" class="control-label {% if field.field.required %}requiredField{% endif %}">
+        {{ field.label }}{% if field.field.required %}<span class="asteriskField">*</span>{% endif %}
+    </label>
+{% endif %}
+The line that we would change would end up like this:
+
+{% if not labels_uppercase %}{{ field.label }}{% else %}{{ field.label|upper }}{% endif %}{% if field.field.required %}
+Now we only need to override field template, for that you may want to check section Overriding layout objects templates.
+
+Warning
+
+Be careful, depending on what you aim to do, sometimes using dynamic layouts is a better option, check section Updating layouts on the go.
+
+Layouts
+Fundamentals
+Django-crispy-forms defines another powerful class called Layout, which allows you to change the way the form fields are rendered. This allows you to set the order of the fields, wrap them in divs or other structures, add html, set ids, classes or attributes to whatever you want, etc. And all that without writing a custom form template, using programmatic layouts. Just attach the layout to a helper, layouts are optional, but probably the most powerful thing django-crispy-forms has to offer.
+
+A Layout is constructed by layout objects, which can be thought of as form components.
+
+All these components are explained later in Universal layout objects, what you need to know now about them is that every component renders a different template and has a different purpose. Let’s write a couple of different layouts for our form, continuing with our form class example (note that the full form is not shown again).
+
+Let’s add a layout to our helper:
+
+from crispy_forms.helper import FormHelper
+from crispy_forms.layout import Layout, Fieldset, Submit
+
+class ExampleForm(forms.Form):
+    [...]
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.helper = FormHelper()
+        self.helper.layout = Layout(
+            Fieldset(
+                'first arg is the legend of the fieldset',
+                'like_website',
+                'favorite_number',
+                'favorite_color',
+                'favorite_food',
+                'notes'
+            ),
+            Submit('submit', 'Submit', css_class='button white'),
+        )
+When we render the form now using:
+
+{% load crispy_forms_tags %}
+{% crispy example_form %}
+We will get the fields wrapped in a fieldset, whose legend will be set to ‘first arg is the legend of the fieldset’. The fields’ order will be: like_website, favorite_number, favorite_color, favorite_food and notes. We also get a submit button which will be styled with Bootstrap’s btn btn-primary classes.
+
+This is just the tip of the iceberg: now imagine you want to add an explanation for what notes are, you can use HTML layout object:
+
+Layout(
+    Fieldset(
+        'Tell us your favorite stuff {{ username }}',
+        'like_website',
+        'favorite_number',
+        'favorite_color',
+        'favorite_food',
+        HTML("""
+            <p>We use notes to get better, <strong>please help us {{ username }}</strong></p>
+        """),
+        'notes'
+    )
+)
+As you’ll notice the fieldset legend is context aware and you can write it as if it were a chunk of a template where the form will be rendered. The HTML object will add a message before the notes input and it’s also context aware. Note how you can wrap layout objects into other layout objects. Layout objects Fieldset, Div, MultiField and ButtonHolder can hold other Layout objects within. Let’s do an alternative layout for the same form:
+
+Layout(
+    MultiField(
+        'Tell us your favorite stuff {{ username }}',
+        Div(
+            'like_website',
+            'favorite_number',
+            css_id = 'special-fields'
+        ),
+        'favorite_color',
+        'favorite_food',
+        'notes'
+    )
+)
+This time we are using a MultiField, which is a layout object that as a general rule can be used in the same places as Fieldset. The main difference is that this renders all the fields wrapped in a div and when there are errors in the form submission, they are shown in a list instead of each one surrounding the field. Sometimes the best way to see what layout objects do, is just try them and play with them a little bit.
+
+Layout objects attributes
+All layout objects you can set kwargs that will be used as HTML attributes. For example if you want to turn autocomplete off for a field you can do:
+
+Field('field_name', autocomplete='off')
+If you want to set html attributes, with words separated by hyphens like data-name, as Python doesn’t support hyphens in keyword arguments and hyphens are the usual notation in HTML, underscores will be translated into hyphens, so you would do:
+
+Field('field_name', data_name="whatever")
+As class is a reserved keyword in Python, for it you will have to use css_class. For example:
+
+Field('field_name', css_class="black-fields")
+And id attribute is set using css_id:
+
+Field('field_name', css_id="custom_field_id")
+Universal layout objects
+These ones live in module crispy_forms.layout. These are layout objects that are not specific to a template pack. We’ll go one by one, showing usage examples:
+
+Div: It wraps fields in a <div>:
+
+Div('form_field_1', 'form_field_2', 'form_field_3', ...)
+NOTE Mainly in all layout objects you can set kwargs that will be used as HTML attributes. As class is a reserved keyword in Python, for it you will have to use css_class. For example:
+
+Div('form_field_1', style="background: white;", title="Explication title", css_class="bigdivs")
+HTML: A very powerful layout object. Use it to render pure html code. In fact it behaves as a Django template and it has access to the whole context of the page where the form is being rendered. This layout object doesn’t accept any extra parameters than the html to render, you cannot set html attributes like in Div:
+
+HTML("{% if success %} <p>Operation was successful</p> {% endif %}")
+Warning
+
+Beware that this is rendered in a standalone template, so if you are using custom templatetags or filters, don’t forget to add your {% load custom_tags %}
+
+Field: Extremely useful layout object. You can use it to set attributes in a field or render a specific field with a custom template. This way you avoid having to explicitly override the field’s widget and pass an ugly attrs dictionary:
+
+Field('password', id="password-field", css_class="passwordfields", title="Explanation")
+Field('slider', template="custom-slider.html")
+This layout object can be used to easily extend Django’s widgets. If you want to render a Django form field as hidden you can simply do:
+
+Field('field_name', type="hidden")
+If you need HTML5 attributes, you can easily do those using underscores data_name kwarg here will become into data-name in your generated html:
+
+Field('field_name', data_name="special")
+Fields in bootstrap are wrapped in a <div class="control-group">. You may want to set extra classes in this div, for that do:
+
+Field('field_name', wrapper_class="extra-class")
+Submit: Used to create a submit button. First parameter is the name attribute of the button, second parameter is the value attribute:
+
+Submit('search', 'SEARCH')
+Renders to:
+
+<input type="submit" name="search" value="SEARCH" class="submit submitButton" id="submit-id-search" />
+Hidden: Used to create a hidden input:
+
+Hidden('name', 'value')
+Button: Creates a button:
+
+Button('name', 'value')
+Reset: Used to create a reset input:
+
+reset = Reset('name', 'value')
+Fieldset: It wraps fields in a <fieldset>. The first parameter is the text for the fieldset legend, as we’ve said it behaves like a Django template:
+
+Fieldset("Text for the legend {{ username }}",
+    'form_field_1',
+    'form_field_2'
+)
+ButtonHolder: It wraps fields in a <div class=”buttonHolder”>, this is a legacy layout object from the uni-form template pack:
+
+ButtonHolder(
+    HTML('<span class="hidden">✓ Saved data</span>'),
+    Submit('save', 'Save')
+)
+MultiField: It wraps fields in a <div> with a label on top. When there are errors in the form submission it renders them in a list instead of each one surrounding the field:
+
+MultiField("Text for the label {{ username }}",
+    'form_field_1',
+    'form_field_2'
+)
+Bootstrap Layout objects
+These ones live under module crispy_forms.bootstrap.
+
+FormActions: It wraps fields in a <div class="form-actions">. It is usually used to wrap form’s buttons:
+
+FormActions(
+    Submit('save', 'Save changes'),
+    Button('cancel', 'Cancel')
+)
+_images/form_actions.png
+AppendedText: It renders a bootstrap appended text input. The first parameter is the name of the field to add appended text to. The second is the appended text which can be wrapped in Django’s mark_safe to allow it to be HTML like. There is an optional parameter active, by default set to False, that you can set to a boolean to render appended text active. See input_size to change the size of this input:
+
+AppendedText('field_name', 'appended text to show')
+AppendedText('field_name', '$', active=True)
+_images/appended_text.png
+PrependedText: It renders a bootstrap prepended text input. The first parameter is the name of the field to add prepended text to. The second is the prepended text which can be wrapped in Django’s mark_safe to allow it to be HTML like. There is an optional parameter active, by default set to False, that you can set to a boolean to render prepended text active. See input_size to change the size of this input:
+
+PrependedText('field_name', mark_safe('<b>Prepended text</b> to show'))
+PrependedText('field_name', '@', placeholder="username")
+_images/prepended_text.png
+PrependedAppendedText: It renders a combined prepended and appended text. The first parameter is the name of the field, then the prepended text and finally the appended text. The text can be wrapped in Django’s mark_safe to allow it to be HTML like. See input_size to change the size of this input:
+
+PrependedAppendedText('field_name', '$', '.00'),
+_images/appended_prepended_text.png
+InlineCheckboxes: It renders a Django forms.MultipleChoiceField field using inline checkboxes:
+
+InlineCheckboxes('field_name')
+_images/inline_checkboxes.png
+InlineRadios: It renders a Django forms.ChoiceField field with its widget set to forms.RadioSelect using inline radio buttons:
+
+InlineRadios('field_name')
+_images/inline_radios.jpg
+StrictButton: It renders a button using <button> html, not input. By default type is set to button and class is set to btn:
+
+StrictButton("Button's content", name="go", value="go", css_class="extra")
+StrictButton('Success', css_class="btn-success")
+_images/strict_button.png
+FieldWithButtons: You can create an input connected with buttons:
+
+The size of the field can be customised in the Bootstrap4 template pack by passing in the size modifier class to `input_size`.
+
+FieldWithButtons('field_name', StrictButton("Go!"), input_size="input-group-sm")
+_images/field_with_buttons.png
+Tab & TabHolder: Tab renders a tab, different tabs need to be wrapped in a TabHolder for automatic JavaScript functioning, also you will need bootstrap-tab.js included in your static files:
+
+TabHolder(
+    Tab('First Tab',
+        'field_name_1',
+        Div('field_name_2')
+    ),
+    Tab('Second Tab',
+        Field('field_name_3', css_class="extra")
+    )
+)
+_images/tab_and_tabholder.jpg
+Accordion & AccordionGroup: AccordionGroup renders an accordion pane, different groups need to be wrapped in an Accordion for automatic JavaScript functioning, also you will need bootstrap-tab.js included in your static files:
+
+Accordion(
+    AccordionGroup('First Group',
+        'radio_buttons'
+    ),
+    AccordionGroup('Second Group',
+        Field('field_name_3', css_class="extra")
+    )
+)
+_images/accordiongroup_and_accordion.jpg
+Alert: Alert generates markup in the form of an alert dialog:
+
+Alert(content="<strong>Warning!</strong> Best check yo self, you're not looking too good.")
+_images/alert.png
+UneditableField: UneditableField renders a disabled field using the bootstrap uneditable-input class:
+
+UneditableField('text_input', css_class='form-control-lg')
+_images/field_disabled.png
+Modal: Modal displays it’s fields inside a bootstrap modal that can be customized using kwargs upon initialization. See the bootstrap docs for more examples of modals and how to control your modal via attributes or via javascript. Only supports Bootstrap v3 or higher:
+
+Layout(
+    Modal(
+        # email.help_text was set during the initalization of the django form field
+        Field('email', placeholder="Email", wrapper_class="mb-0"),
+        Button(
+            "submit",
+            "Send Reset Email",
+            id="email_reset",
+            css_class="btn-primary mt-3",
+            onClick="someJavasciptFunction()", # used to submit the form
+        ),
+        css_id="my_modal_id",
+        title="This is my modal",
+        title_class="w-100 text-center",
+    )
+)
+_images/modal.png
+Input group size
+Input group size: By default the standard Bootstrap input sizes are used. To adjust the size of an input group (AppendedText, PrependedText, PrependedAppendedText) add the appropriate CSS class:
+
+# Bootstrap 3 - Inputs and spans need size class. Use `css_class`.
+PrependedText('field_name', StrictButton("Go!"), css_class="input-sm")
+PrependedText('field_name', StrictButton("Go!"), css_class="input-lg")
+
+# Bootstrap 4 - Wrapping div needs size class. Use `input_size`.
+PrependedText('field_name', StrictButton("Go!"), input_size="input-group-sm")
+PrependedText('field_name', StrictButton("Go!"), input_size="input-group-lg")
+Overriding layout objects templates
+The mentioned set of Universal layout objects has been thoroughly designed to be flexible, standard compatible and support Django form features. Every Layout object is associated to a different template that lives in templates/{{ TEMPLATE_PACK_NAME }}/layout/ directory.
+
+Some advanced users may want to use their own templates, to adapt the layout objects to their use or necessities. There are three ways to override the template that a layout object uses.
+
+Globally: You override the template of the layout object, for all instances of that layout object you use:
+
+from crispy_forms.layout import Div
+Div.template = 'my_div_template.html'
+Individually: You can override the template for a specific layout object in a layout:
+
+Layout(
+    Div(
+        'field1',
+        'field2',
+        template='my_div_template.html'
+    )
+)
+Overriding templates directory: This means mimicking crispy-forms directory structure into your project and then copying the templates that you want to override there, finally editing those copies. If you are using this approach it’s better to just copy and edit templates you will customize instead of all.
+
+Overriding project templates
+You need to differentiate between layout objects’ templates and django-crispy-forms templates. There are some templates that live in templates/{{ TEMPLATE_PACK_NAME }} that define the form/formset structure, how a field or errors are rendered, etc. They add very little logic and are pretty much basic wrappers for the rest of django-crispy-forms power. To override these ones you have two options:
+
+template and field_template attributes in FormHelper: Since version 1.3.0 you can override the form/formset template and the field template using helper attributes, see section Helper attributes you can set. With this you can change one specific form or all your project forms (creating a custom FormHelper base class for example).
+
+Overriding templates directory: This works the same as explained in section Overriding layout objects templates. If you are adapting crispy-forms templates to a popular open source template pack you use, submit it so more people can benefit from it.
+
+Creating a TEMPLATE PACK: You maybe want to use crispy-forms with you favorite CSS framework or your Company’s CSS. For doing so, you will need to be quite familiar with crispy-forms, layout objects and their templates. You will probably want to start off with one of the existing template packs, probably bootstrap. Imagine your template pack is named chocolate, that means you probably want your root directory named the same way. For using your template pack, you will have to set CRISPY_TEMPLATE_PACK = 'chocolate' variable in your settings file and also set CRISPY_ALLOWED_TEMPLATE_PACKS = ('bootstrap', 'chocolate'). This way crispy-forms will know you want to use your own template pack, which is an allowed one and where to look for it.
+
+Creating your own layout objects
+The Universal layout objects bundled with django-crispy-forms are a set of the most seen components that build a form. You will probably be able to do anything you need combining them. Anyway, you may want to create your own components, for doing that, you will need a good grasp of django-crispy-forms. Every layout object must have a method called render. Its prototype should be:
+
+def render(self, form, context):
+The official layout objects live in layout.py and bootstrap.py, you may want to have a look at them to fully understand how to proceed. But in general terms, a layout object is a template rendered with some parameters passed.
+
+If you come up with a good idea and design a layout object you think others could benefit from, please open an issue or send a pull request, so django-crispy-forms gets better.
+
+Composing layouts
+Imagine you have several forms that share a big chunk of the same layout. There is a easy way you can create a Layout, reuse and extend it. You can have a Layout as a component of another Layout. You can build that common chunk, different ways. As a separate class:
+
+class CommonLayout(Layout):
+    def __init__(self, *args, **kwargs):
+        super().__init__(
+            MultiField("User data",
+                'username',
+                'lastname',
+                'age'
+            )
+        )
+Maybe an object instance is good enough:
+
+common_layout = Layout(
+    MultiField("User data",
+        'username',
+        'lastname',
+        'age'
+    )
+)
+Then you can do:
+
+helper.layout = Layout(
+    CommonLayout(),
+    Div(
+        'favorite_food',
+        'favorite_bread',
+        css_id = 'favorite-stuff'
+    )
+)
+Or:
+
+helper.layout = Layout(
+    common_layout,
+    Div(
+        'professional_interests',
+        'job_description',
+    )
+)
+We have defined a layout and used it as a chunk of another layout, which means that those two layouts will start the same way and then extend the layout in different ways.
+
+How to create your own template packs
+First you will have to name your template pack, for this you can’t use the name of one of the available template packs in crispy-forms, due to name collisions. For example, let’s say in the company we work for, a designer has come up with a CSS bootstrap internally known as chocolate. The company has a Django project that needs to start using chocolate, therefore we need to create a folder named chocolate within our templates directory. Check your TEMPLATE_DIRS setting in Django and pick your preferred path.
+
+Once we have that folder created, we will have to create a concrete directory hierarchy so that crispy-forms can pick it up. This is what bootstrap template pack (v2) looks like:
+
+.
+├── accordion-group.html
+├── accordion.html
+├── betterform.html
+├── display_form.html
+├── errors.html
+├── errors_formset.html
+├── * field.html
+├── layout
+│   ├── alert.html
+│   ├── * baseinput.html
+│   ├── button.html
+│   ├── checkboxselectmultiple.html
+│   ├── checkboxselectmultiple_inline.html
+│   ├── div.html
+│   ├── field_errors.html
+│   ├── field_errors_block.html
+│   ├── field_with_buttons.html
+│   ├── fieldset.html
+│   ├── formactions.html
+│   ├── help_text.html
+│   ├── help_text_and_errors.html
+│   ├── multifield.html
+│   ├── prepended_appended_text.html
+│   ├── radioselect.html
+│   ├── radioselect_inline.html
+│   ├── tab-link.html
+│   ├── tab.html
+│   └── uneditable_input.html
+├── table_inline_formset.html
+├── * uni_form.html
+├── uni_formset.html
+├── * whole_uni_form.html
+└── whole_uni_formset.html
+Take it easy, don’t panic, we won’t need this many templates for our template pack. Templates are also quite simple to follow if you understand what problem crispy-forms solves. The bare minimum would be the templates marked with an asterisk.
+
+Fundamentals
+First, since crispy-forms 1.5.0, template packs are self contained, you cannot reference a template from a different template pack.
+
+crispy-forms has many features, but maybe you don’t need your template pack to cover all of them. {% crispy %} templatetag renders forms using a global structure contained within whole_uni_form.html. However, |crispy filter uses uni_form.html. As you’ve probably guessed, the name of the templates comes from the old days of django-uni-form. Anyway, as an example, if we don’t use |crispy filter, we don’t really need to maintain a uni_form.html template within our template pack.
+
+If we are planning on using formsets + {% crispy %} we will need a whole_uni_formset.html, instead if we use formsets + |crispy we will need uni_formset.html.
+
+All of these templates use a tag named {% crispy_field %} that is loaded doing {% load crispy_forms_field %}, that generates the html for <input> using field.html template, but previously doing Python preparation beforehand. In case you wonder the code for this tag lives in crispy_forms.templatetags.crispy_forms_field, together with some other stuff.
+
+So a template pack for a very basic example covering only forms and the usage of {% crispy %} tag, would need 2 templates: whole_uni_form.html, field.html. Well, that’s not completely true, because every layout object has a template attached. So if we wanted to use Div, we would need div.html. Some are not that obvious, if you need Submit, you will need baseinput.html. Some layout objects, don’t really have a template attached, like HTML.
+
+In the previous template tree, there are some templates that are there for DRY purposes, they are not really compulsory or part of a layout object, so don’t worry too much.
+
+Starting
+Now your best bet is probably start copying some or all of the templates under an existing crispy-forms template pack, such as bootstrap3, then drop the ones you don’t need. Next step is edit those templates, and adjust the HTML/CSS making it align with chocolate, that sometimes means dropping/adding divs, classes and other stuff around. You can always create a form in your application, with a helper attached to that new template pack and start trying out your adaptation right away.
+
+Currently, there is an existing template pack for crispy-forms that doesn’t live in core, developed by David Thenon as an external pluggable application named crispy-forms-foundation, it’s also a good reference to check out.
+
+Beware that crispy-forms evolves and adds new FormHelper.attributes, if you want to use those in the future you will have to adapt your templates adding those variables and its handling.
+
+
+{% crispy %} tag with formsets
+{% crispy %} tag supports formsets rendering too, all kind of Django formsets: formsets, modelformsets and inline formsets. In this section, it’s taken for granted that you are familiar with previous explained crispy-forms concepts in the docs, like FormHelper, how to set FormHelper attributes or render a simple form using {% crispy %} tag.
+
+Formsets
+It’s not the purpose of this documentation to explain how formsets work in detail, for that you should check Django official formset docs. Let’s start creating a formset using the previous ExampleForm form:
+
+from django.forms.models import formset_factory
+
+ExampleFormSet = formset_factory(ExampleForm, extra=3)
+formset = ExampleFormSet()
+This is how you would render the formset using default rendering, no layouts or form helpers:
+
+{% crispy formset %}
+Of course, you can still use a helper, otherwise there would be nothing crispy in this. When using a FormHelper with a formset compared to when you use it with a form, the main difference is that helper attributes are applied to the form structure, while the layout is applied to the formset’s forms. Let’s create a helper for our ExampleFormSet:
+
+class ExampleFormSetHelper(FormHelper):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.form_method = 'post'
+        self.layout = Layout(
+            'favorite_color',
+            'favorite_food',
+        )
+        self.render_required_fields = True
+This helper is quite easy to follow. We want our form to use POST method, and we want favorite_color to be the first field, then favorite_food and finally we tell crispy to render all required fields after. Let’s go and use it, when using {% crispy %} tag in a template there is one main difference when rendering formsets vs forms, in this case you need to specify the helper explicitly.
+
+This would be part of an hypothetical function view:
+
+formset = ExampleFormSet()
+helper = ExampleFormSetHelper()
+return render(request, 'template.html', {'formset': formset, 'helper': helper})
+Then in template.html you would have to do:
+
+{% crispy formset helper %}
+There are two ways you can add submit buttons to a formset. Using FormHelper.add_input method:
+
+helper.add_input(Submit("submit", "Save"))
+Or you can set FormHelper.form_tag to False and control the formset outer structure at your will writing boring HTML:
+
+<form action="{% url 'save_formset' %}" method="POST">
+    {% crispy formset helper %}
+    <div class="form-actions">
+        <input type="submit" name="submit" value="Save" class="btn btn-primary" id="submit-save">
+    </div>
+</form>
+Finally, model formsets and inline formsets are rendered exactly the same as formsets, the only difference is how you build them in your Django code.
+
+Extra context
+Rendering any kind of formset with crispy injects some extra context in the layout rendering so that you can do things like:
+
+class ExampleFormSetHelper(FormHelper):
+    def __init__(self, *args, **kwargs):
+        super(FormHelper, self).__init__(*args, **kwargs)
+        self.form_method = 'post'
+        self.layout = Layout(
+            HTML('{% if forloop.first %} Only display text on the first iteration... {% endif %}'),
+            Fieldset('Item: {{forloop.counter}}', 'field'),
+            'favorite_color',
+            'favorite_food',
+        )
+        self.add_input(Submit('submit', 'Save'))
+Basically you can access a forloop Django node, as if you were rendering your formsets forms using a for loop.
+
+Custom templates and table inline formsets
+Default formset template will render your formset’s form using divs, but many times people prefer tables for formsets. Don’t worry, crispy-forms’s got you covered. FormHelper has an attribute named template that can be used to specify a custom template for rendering a form or formset, in this case a formset. Obviously when we specify a template attribute, we are making that helper only usable with forms or formsets.
+
+The name of the template to use is table_inline_formset.html and you use it doing:
+
+helper.template = 'bootstrap/table_inline_formset.html'
+The best part is that if this template doesn’t do exactly what you want, you can copy it into your templates folder, customize it and then link your helper to your alternative version. If you think what you are missing would be valuable to others, then please submit a pull request at github.
+
+Warning
+
+This template doesn’t currently take into account any layout you have specified and only works with bootstrap template pack.
+
+Formset forms with different layouts
+By default crispy-forms formset rendering shares the same layout among all formset’s forms. This is the case 99% of the times. But maybe you want to render your formset’s forms using different layouts that you cannot achieve using the extra context injected, for that you will have to create and use a custom template. Most likely you will want to do:
+
+{{ formset.management_form|crispy }}
+{% for form in formset %}
+    {% crispy form %}
+{% endfor %}
+Where every form has a helper attribute from which crispy will grab the layout. In your view you will need to change the layout or use a different help for every formset’s form. Make sure that you have form_tag attribute set to False, otherwise you will get 3 individual forms rendered.
+
